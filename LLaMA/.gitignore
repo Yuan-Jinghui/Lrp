@@ -100,6 +100,7 @@ nohup*.out
 # Data cache
 .cache/
 *.cache
+c4_local
 
 # IDE
 .vscode/
@@ -114,4 +115,3 @@ Thumbs.db
 # Temporary files
 tmp/
 temp/
-

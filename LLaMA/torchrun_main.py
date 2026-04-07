@@ -96,18 +96,23 @@ def parse_args(args):
     parser.add_argument("--single_cuda", default=False, action="store_true")
     parser.add_argument("--use_hf_model", default=False, action="store_true")
     parser.add_argument("--r", type=float, default=1.833, help="The r value for L_{r, \\infty} norm in New_Optimizer (default: 1.833)")
+    parser.add_argument("--local_data_dir", type=str, default=os.path.join(os.path.dirname(__file__), "c4_local"), help="Path to pre-downloaded local dataset")
     args = parser.parse_args(args)
     args = args_utils.check_args_torchrun_main(args)
     return args
 
 
 @torch.no_grad()
-def evaluate_model(model, preprocess_batched, pad_idx, global_rank, world_size, device, batch_size, target_eval_tokens):
+def evaluate_model(model, preprocess_batched, pad_idx, global_rank, world_size, device, batch_size, target_eval_tokens, local_data_dir=None):
     _time = time.time()
     
-    # Load validation dataset
-    val_data = datasets.load_dataset("allenai/c4", "en", split="validation", streaming=True)
-    val_data = val_data.shuffle(seed=42)
+    if local_data_dir is not None:
+        val_data = datasets.load_from_disk(os.path.join(local_data_dir, "validation"))
+        val_data = val_data.to_iterable_dataset()
+        val_data = val_data.shuffle(seed=42, buffer_size=10000)
+    else:
+        val_data = datasets.load_dataset("allenai/c4", "en", split="validation", streaming=True)
+        val_data = val_data.shuffle(seed=42)
     logger.info(f"Loaded validation dataset in {time.time() - _time:.2f} seconds")
 
     if world_size > 1:
@@ -206,11 +211,19 @@ def main(args):
 
     # Load training dataset
     logger.info("Loading training dataset...")
-    data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True)
-    
-    seed_for_shuffle = 42 
+
+    seed_for_shuffle = 42
     logger.info(f"Shuffling data with seed {seed_for_shuffle}")
-    data: datasets.Dataset = data.shuffle(seed=seed_for_shuffle)
+
+    if args.local_data_dir is not None:
+        logger.info(f"Loading local dataset from {args.local_data_dir}/train")
+        data = datasets.load_from_disk(os.path.join(args.local_data_dir, "train"))
+        data = data.to_iterable_dataset()
+        data = data.shuffle(seed=seed_for_shuffle, buffer_size=10000)
+    else:
+        data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True)
+        data: datasets.Dataset = data.shuffle(seed=seed_for_shuffle)
+
     if world_size > 1:
         data = datasets.distributed.split_dataset_by_node(
             data, rank=global_rank, world_size=world_size,
@@ -516,7 +529,7 @@ def main(args):
         if update_step % args.eval_every == 0:
             logger.info(f"Performing evaluation at step {update_step}")
             total_loss, evaluated_on_tokens = evaluate_model(
-                model, preprocess_batched, pad_idx, global_rank, world_size, device, args.batch_size, target_eval_tokens=args.target_eval_tokens
+                model, preprocess_batched, pad_idx, global_rank, world_size, device, args.batch_size, target_eval_tokens=args.target_eval_tokens, local_data_dir=args.local_data_dir
             )
             if global_rank == 0:
                 wandb.log({
@@ -602,7 +615,7 @@ def main(args):
     torch.cuda.empty_cache()
 
     total_loss, evaluated_on_tokens = evaluate_model(
-        model, preprocess_batched, pad_idx, global_rank, world_size, device, args.batch_size, target_eval_tokens=args.target_eval_tokens
+        model, preprocess_batched, pad_idx, global_rank, world_size, device, args.batch_size, target_eval_tokens=args.target_eval_tokens, local_data_dir=args.local_data_dir
     )
 
     if global_rank == 0:
