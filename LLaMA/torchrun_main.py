@@ -383,7 +383,7 @@ def main(args):
     if args.local_data_dir is not None:
         logger.info(f"Loading local dataset from {args.local_data_dir}/train")
         data = datasets.load_from_disk(os.path.join(args.local_data_dir, "train"))
-        data = data.to_iterable_dataset()
+        data = data.to_iterable_dataset(num_shards=32)
         data = data.shuffle(seed=seed_for_shuffle, buffer_size=10000)
     else:
         data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True)
@@ -414,7 +414,19 @@ def main(args):
     )
 
     # Restore data loader parallelism after DDP stabilization.
-    num_workers = min(args.workers, 4) if args.local_data_dir is not None else args.workers
+    requested_workers = 4 if args.local_data_dir is not None else args.workers
+    num_workers = requested_workers
+    dataset_num_shards = getattr(data, "num_shards", None)
+    if dataset_num_shards is None:
+        dataset_num_shards = getattr(data, "n_shards", None)
+    if isinstance(dataset_num_shards, int) and dataset_num_shards > 0:
+        num_workers = min(num_workers, dataset_num_shards)
+        if requested_workers > num_workers:
+            logger.warning(
+                f"Reducing dataloader workers from {requested_workers} to {num_workers} "
+                f"to match dataset shards ({dataset_num_shards})"
+            )
+    logger.info(f"Using dataloader num_workers={num_workers}")
     dataloader_kwargs = dict(
         dataset=dataset,
         batch_size=None,
