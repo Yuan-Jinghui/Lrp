@@ -323,6 +323,15 @@ EOF
 echo "Training parameters saved to: $SAVE_DIR/training_params.json"
 echo "Starting training..."
 
+# NCCL/Torch distributed runtime env (stability/perf tuning)
+unset NCCL_SOCKET_IFNAME
+unset NCCL_IB_DISABLE
+export NCCL_P2P_DISABLE=1
+export NCCL_CUMEM_ENABLE=0
+unset TORCH_DISTRIBUTED_DEBUG
+unset TORCH_NCCL_BLOCKING_WAIT
+unset NCCL_CUMEM_ENABLE
+
 # Execute training
 cd "$PROJECT_DIR"
 exec "${TORCHRUN_CMD[@]}" -- "$PYTHON_CMD" "${ARGS[@]}"

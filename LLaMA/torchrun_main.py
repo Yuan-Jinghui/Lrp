@@ -127,7 +127,7 @@ def evaluate_model(model, preprocess_batched, pad_idx, global_rank, world_size, 
 
     evaluated_on_tokens = 0
     total_loss = torch.tensor(0.0).to(device)
-    total_batches = 1
+    total_batches = 0
     logger.info(f"Eval set prepared in {time.time() - _time:.2f} seconds")
 
     for batch in val_data_mapped.batch(batch_size=batch_size):
@@ -143,7 +143,8 @@ def evaluate_model(model, preprocess_batched, pad_idx, global_rank, world_size, 
 
         evaluated_on_tokens += (batch["input_ids"] != pad_idx).sum().item() * world_size 
 
-    total_loss = total_loss / total_batches 
+    if total_batches > 0:
+        total_loss = total_loss / total_batches
 
     # Only gather if distributed
     if world_size > 1:
