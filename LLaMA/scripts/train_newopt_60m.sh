@@ -9,7 +9,7 @@ exec "$SCRIPT_DIR/train_universal.sh" \
     --num_gpus 4 \
     --lr_matrix 0.005 \
     --lr_adam 0.005 \
-    --r 1.833 \
+    --r 2.25 \
     --num_steps 10000 \
     --batch_size 64 \
     --total_batch_size 512 \

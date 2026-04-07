@@ -209,41 +209,6 @@ def main(args):
         logger.info(f"{k:30} {v}")
     logger.info("*" * 40)
 
-    # Load training dataset
-    logger.info("Loading training dataset...")
-
-    seed_for_shuffle = 42
-    logger.info(f"Shuffling data with seed {seed_for_shuffle}")
-
-    if args.local_data_dir is not None:
-        logger.info(f"Loading local dataset from {args.local_data_dir}/train")
-        data = datasets.load_from_disk(os.path.join(args.local_data_dir, "train"))
-        data = data.to_iterable_dataset()
-        data = data.shuffle(seed=seed_for_shuffle, buffer_size=10000)
-    else:
-        data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True)
-        data: datasets.Dataset = data.shuffle(seed=seed_for_shuffle)
-
-    if world_size > 1:
-        data = datasets.distributed.split_dataset_by_node(
-            data, rank=global_rank, world_size=world_size,
-        )
-
-    tokenizer = AutoTokenizer.from_pretrained("t5-base", model_max_length=args.max_length)
-
-    def preprocess_batched(batch):
-        batch = tokenizer(
-            batch["text"],
-            max_length=args.max_length,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt",
-        )
-        return batch
-
-    dataset = PreprocessedIterableDataset(data, tokenizer, batch_size=args.batch_size, max_length=args.max_length)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=None, num_workers=args.workers)
-
     model_config = AutoConfig.from_pretrained(args.model_config)
     if args.use_hf_model:
         model: HF_LlamaForCausalLM = AutoModelForCausalLM.from_config(model_config)
@@ -287,7 +252,25 @@ def main(args):
     else:
         model = model.to(device=device)
 
-    n_total_params = sum(p.numel() for p in model.parameters())
+    # DDP must be before optimizer and local data loading
+    if world_size > 1:
+        print(
+            f"[rank {global_rank}] pre-ddp "
+            f"param_cnt={len(list(model.parameters()))}, "
+            f"trainable_cnt={sum(int(p.requires_grad) for p in model.parameters())}, "
+            f"numel={sum(p.numel() for p in model.parameters())}"
+        )
+        sys.stdout.flush()
+
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=False,
+        )
+
+    base_model = model.module if hasattr(model, "module") else model
+    n_total_params = sum(p.numel() for p in base_model.parameters())
     
     # Initialize wandb config
     run_config = dict(vars(args))
@@ -306,25 +289,22 @@ def main(args):
         pbar = tqdm(total=args.num_training_steps - update_step, desc="Update steps", ncols=80)
     
     logger.info(f"\n{model}\n")
-    logger.info(f"Total params: {sum(p.numel() for p in model.parameters()) / 1_000_000:.2f}M")
-    logger.info(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1_000_000:.2f}M")
+    logger.info(f"Total params: {sum(p.numel() for p in base_model.parameters()) / 1_000_000:.2f}M")
+    logger.info(f"Trainable params: {sum(p.numel() for p in base_model.parameters() if p.requires_grad) / 1_000_000:.2f}M")
     logger.info(f"Saving model to {args.save_dir} every {args.save_every} update steps")
-    
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
 
-    # Setup optimizer - only muon and RMNP supported
+    # Setup optimizer after DDP wrapping
     if args.optimizer.lower() == "muon":
         from optimizers.muon_optimizer import get_muon_optimizer
         lr_muon = args.lr_matrix if args.lr_matrix is not None else args.lr
         lr_adamw = args.lr_adam if args.lr_adam is not None else 0.001
-        optimizer = get_muon_optimizer(model, lr_muon=lr_muon, lr_adamw=lr_adamw, weight_decay=args.weight_decay)
+        optimizer = get_muon_optimizer(base_model, lr_muon=lr_muon, lr_adamw=lr_adamw, weight_decay=args.weight_decay)
     elif args.optimizer.lower() == "rmnp":
         from optimizers.RMNP_optimizer import get_rmnp_optimizer
-        # Use separate learning rates - both must be specified for RMNP
         if args.lr_matrix is None or args.lr_adam is None:
             raise ValueError("RMNP requires both --lr_matrix and --lr_adam to be specified")
         optimizer = get_rmnp_optimizer(
-            model,
+            base_model,
             lr_rmnp=args.lr_matrix,
             lr_adam=args.lr_adam,
             momentum=0.95,
@@ -335,7 +315,7 @@ def main(args):
         if args.lr_matrix is None or args.lr_adam is None:
             raise ValueError("shampoo requires both --lr_matrix and --lr_adam to be specified")
         optimizer = get_shampoo_optimizer(
-            model,
+            base_model,
             lr_shampoo=args.lr_matrix,
             lr_adam=args.lr_adam,
             weight_decay=args.weight_decay
@@ -345,7 +325,7 @@ def main(args):
         if args.lr_matrix is None or args.lr_adam is None:
             raise ValueError("soap requires both --lr_matrix and --lr_adam to be specified")
         optimizer = get_soap_optimizer(
-            model,
+            base_model,
             lr_soap=args.lr_matrix,
             lr_adam=args.lr_adam,
             weight_decay=args.weight_decay,
@@ -356,10 +336,10 @@ def main(args):
         if args.lr_matrix is None or args.lr_adam is None:
             raise ValueError("new_optimizer requires both --lr_matrix and --lr_adam to be specified")
         optimizer = get_new_optimizer(
-            model,
-            lr_rmnp=args.lr_matrix,  
-            lr_adam=args.lr_adam,    
-            r=args.r,                
+            base_model,
+            lr_rmnp=args.lr_matrix,
+            lr_adam=args.lr_adam,
+            r=args.r,
             momentum=0.95,
             weight_decay=args.weight_decay
         )
@@ -395,12 +375,56 @@ def main(args):
         else:
             logger.warning(f"Optimizer state not found at {optimizer_path}")
 
+    # Load training dataset at the end
+    logger.info("Loading training dataset...")
+    seed_for_shuffle = 42
+    logger.info(f"Shuffling data with seed {seed_for_shuffle}")
+
+    if args.local_data_dir is not None:
+        logger.info(f"Loading local dataset from {args.local_data_dir}/train")
+        data = datasets.load_from_disk(os.path.join(args.local_data_dir, "train"))
+        data = data.to_iterable_dataset()
+        data = data.shuffle(seed=seed_for_shuffle, buffer_size=10000)
+    else:
+        data = datasets.load_dataset("allenai/c4", "en", split="train", streaming=True)
+        data = data.shuffle(seed=seed_for_shuffle)
+
     if world_size > 1:
-        model: LlamaForCausalLM = torch.nn.parallel.DistributedDataParallel(
-            model,
-            device_ids=[local_rank],
-            output_device=local_rank,
-            broadcast_buffers=False)
+        data = datasets.distributed.split_dataset_by_node(
+            data, rank=global_rank, world_size=world_size,
+        )
+
+    tokenizer = AutoTokenizer.from_pretrained("t5-base", model_max_length=args.max_length)
+
+    def preprocess_batched(batch):
+        batch = tokenizer(
+            batch["text"],
+            max_length=args.max_length,
+            truncation=True,
+            padding="max_length",
+            return_tensors="pt",
+        )
+        return batch
+
+    dataset = PreprocessedIterableDataset(
+        data,
+        tokenizer,
+        batch_size=args.batch_size,
+        max_length=args.max_length
+    )
+
+    # Restore data loader parallelism after DDP stabilization.
+    num_workers = min(args.workers, 4) if args.local_data_dir is not None else args.workers
+    dataloader_kwargs = dict(
+        dataset=dataset,
+        batch_size=None,
+        num_workers=num_workers,
+        pin_memory=True,
+    )
+    if num_workers > 0:
+        dataloader_kwargs["persistent_workers"] = True
+        dataloader_kwargs["prefetch_factor"] = 4
+    dataloader = torch.utils.data.DataLoader(**dataloader_kwargs)
 
     # Training loop
     pad_idx = tokenizer.pad_token_id
@@ -445,7 +469,7 @@ def main(args):
             if global_step <= 10:
                 start_time = time.time()
                 
-            batch = {k: v.to(device) for k, v in batch.items()}
+            batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             labels = batch["input_ids"].clone()
             labels[labels == pad_idx] = -100
             tokens_seen += (batch["input_ids"] != pad_idx).sum().item() * world_size
@@ -546,6 +570,7 @@ def main(args):
         tokens_in_update = tokens_seen - tokens_seen_before
         tokens_seen_before = tokens_seen
         batches_in_update = args.gradient_accumulation * world_size
+        elapsed = time.time() - update_time
         
         if global_rank == 0:
             log_dict = {
@@ -554,9 +579,9 @@ def main(args):
                 "weight_decay": args.weight_decay,
                 "update_step": update_step,
                 "tokens_seen": tokens_seen,
-                "throughput_tokens": tokens_in_update / update_time,
-                "throughput_examples": args.total_batch_size / update_time,
-                "throughput_batches": batches_in_update / update_time,
+                "throughput_tokens": tokens_in_update / elapsed,
+                "throughput_examples": args.total_batch_size / elapsed,
+                "throughput_batches": batches_in_update / elapsed,
             }
             wandb.log(log_dict, step=update_step)
             
@@ -610,7 +635,7 @@ def main(args):
     # Final evaluation
     logger.info("Running final evaluation")
     model.eval()
-    del loss, loss_temp, optimizer, scheduler
+    del optimizer, scheduler
     import gc; gc.collect()
     torch.cuda.empty_cache()
 
