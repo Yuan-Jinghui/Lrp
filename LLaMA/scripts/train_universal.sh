@@ -19,7 +19,7 @@ fi
 # Default parameters
 MODEL_SIZE="60m"
 OPTIMIZER="muon"
-NUM_GPUS="8"
+NUM_GPUS="4"
 LEARNING_RATE="0.001"
 LR_MATRIX=""
 LR_ADAM=""
@@ -50,7 +50,7 @@ Required parameters:
   --optimizer     Optimizer: muon, RMNP
 
 Hardware:
-  --num_gpus      Number of GPUs (default: 8). Gradient accumulation is
+  --num_gpus      Number of GPUs (default: 4). Gradient accumulation is
                   auto-computed as total_batch_size / (batch_size * num_gpus)
 
 Basic training parameters:
