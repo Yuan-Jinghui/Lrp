@@ -6,10 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$SCRIPT_DIR/train_universal.sh" \
     --model_size 60m \
     --optimizer new_optimizer \
-    --num_gpus 4 \
+    --num_gpus 2 \
     --lr_matrix 0.005 \
     --lr_adam 0.005 \
-    --r 2.25 \
+    --r 2.5 \
     --num_steps 10000 \
     --batch_size 64 \
     --total_batch_size 512 \

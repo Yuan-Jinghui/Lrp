@@ -1,6 +1,4 @@
-import itertools
-
-from torch.utils.data import IterableDataset, get_worker_info
+from torch.utils.data import IterableDataset
 
 
 class PreprocessedIterableDataset(IterableDataset):
@@ -12,13 +10,9 @@ class PreprocessedIterableDataset(IterableDataset):
         self.max_length = max_length
 
     def __iter__(self):
-        worker_info = get_worker_info()
-        if worker_info is None:
-            iter_data = iter(self.data)
-        else:
-            worker_id = worker_info.id
-            num_workers = worker_info.num_workers
-            iter_data = itertools.islice(self.data, worker_id, None, num_workers)
+        # Upstream dataset partitioning (rank/world_size + DataLoader internals) already
+        # handles worker/rank sharding. Avoid a second manual split here.
+        iter_data = iter(self.data)
 
         text_batch = []
         for example in iter_data:
