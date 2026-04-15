@@ -45,11 +45,18 @@ class new_optimizer(torch.optim.Optimizer):
 
                     #old_row_norms = torch.norm(p.data, p=2, dim=-1, keepdim=True)
                     #theta_hat = p.data / (old_row_norms + eps)
-                    theta_hat = p.data
-                    
-                    dot_product = torch.sum(M * theta_hat, dim=-1, keepdim=True)
-                    v = M - dot_product * theta_hat
-                    
+                    theta = p.data
+
+                    # 1. 计算内积 <M, theta>
+                    dot_product = torch.sum(M * theta, dim=-1, keepdim=True)
+
+                    # 2. 计算 theta 的模长平方 ||theta||^2
+                    theta_sq_norm = torch.sum(theta * theta, dim=-1, keepdim=True)
+
+                    # 3. 严格的正交投影（切空间投影）：M - (<M, theta> / ||theta||^2) * theta
+                    v = M - (dot_product / (theta_sq_norm + eps)) * theta
+
+                    # 4. 行归一化 (保留 RMNP 的核心)
                     v_hat = F.normalize(v, p=2, dim=-1)
                     
                     scale = max(1, math.sqrt(grad.size(-2) / grad.size(-1)))
