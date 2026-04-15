@@ -43,8 +43,9 @@ class new_optimizer(torch.optim.Optimizer):
                     M = grad.lerp(buf, momentum) 
                     
 
-                    old_row_norms = torch.norm(p.data, p=2, dim=-1, keepdim=True)
-                    theta_hat = p.data / (old_row_norms + eps)
+                    #old_row_norms = torch.norm(p.data, p=2, dim=-1, keepdim=True)
+                    #theta_hat = p.data / (old_row_norms + eps)
+                    theta_hat = p.data
                     
                     dot_product = torch.sum(M * theta_hat, dim=-1, keepdim=True)
                     v = M - dot_product * theta_hat
@@ -59,8 +60,8 @@ class new_optimizer(torch.optim.Optimizer):
                     
                     p.data.add_(update_direction, alpha=-lr)
                     
-                    new_row_norms = torch.norm(p.data, p=2, dim=-1, keepdim=True)
-                    p.data.mul_(old_row_norms / (new_row_norms + eps))
+                    #new_row_norms = torch.norm(p.data, p=2, dim=-1, keepdim=True)
+                    #p.data.mul_(old_row_norms / (new_row_norms + eps))
                     
                     param_state['momentum_buffer'] = buf
                     
